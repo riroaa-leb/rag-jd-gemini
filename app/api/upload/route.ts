@@ -2,15 +2,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { supabase } from "@/lib/db";
-import { extractText } from "@/lib/extractText";
 import { chunkText } from "@/lib/chunker";
 import { embed } from "@/lib/embedding";
 import { genAI } from "@/lib/gemini";
+import pdf from "pdf-parse";
+
+// --- Extract text from PDF or fallback to text file ---
+async function extractText(file: File) {
+  const arrayBuffer = await file.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+
+  if (file.type === "application/pdf") {
+    const data = await pdf(buffer);
+    return data.text;
+  }
+
+  // For plain text files
+  return new TextDecoder().decode(arrayBuffer);
+}
 
 // --- Extract role + seniority using Gemini 2.5 Flash ---
 async function getJobMetadata(text: string) {
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash", // stable production model
+    model: "gemini-2.5-flash",
     generationConfig: { responseMimeType: "application/json" },
   });
 
@@ -68,7 +82,7 @@ export async function POST(req: NextRequest) {
     // 2️⃣ Extract metadata
     const metadata = await getJobMetadata(text);
 
-    // 3️⃣ Insert JD into Supabase and capture errors
+    // 3️⃣ Insert JD into Supabase
     const jdId = uuidv4();
     const { error: jdError } = await supabase.from("job_descriptions").insert({
       id: jdId,
@@ -90,7 +104,6 @@ export async function POST(req: NextRequest) {
       try {
         const embedding = await embed(chunk);
 
-        // Validate embedding
         if (!Array.isArray(embedding) || embedding.length !== 3072) {
           console.warn("Invalid embedding, skipping chunk:", embedding?.length);
           continue;
