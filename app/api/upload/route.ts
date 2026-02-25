@@ -9,7 +9,9 @@ import { genAI } from "@/lib/gemini";
 
 // --- Extract role + seniority using Gemini 2.5 Flash ---
 async function getJobMetadata(text: string) {
-  // 1. Correct Model Name
+  console.log("--- Starting Metadata Extraction ---");
+  console.log("Input text length (sliced):", text.slice(0, 3000).length);
+
   const model = genAI.getGenerativeModel({
     model: "gemini-2.5-flash", 
     generationConfig: { responseMimeType: "application/json" },
@@ -23,31 +25,48 @@ Job Description:
 ${text.slice(0, 3000)}
 `;
 
-  // On Vercel, reduce retries to 2. If it fails twice, 
-  // you're likely hitting a timeout anyway.
   for (let i = 0; i < 2; i++) {
+    const startTime = Date.now();
     try {
+      console.log(`Gemini Attempt ${i + 1} sending...`);
+      
       const result = await model.generateContent(prompt);
-      let responseText = result.response.text();
+      const responseText = result.response.text();
+      const duration = Date.now() - startTime;
+
+      console.log(`Gemini Attempt ${i + 1} received in ${duration}ms`);
+      console.log("Raw Response Content:", responseText);
 
       if (responseText) {
         try {
-          // Sanitize: remove markdown backticks if present
           const cleanJson = responseText.replace(/```json|```/g, "").trim();
-          return JSON.parse(cleanJson);
+          const parsed = JSON.parse(cleanJson);
+          console.log("Successfully parsed metadata:", parsed);
+          return parsed;
         } catch (parseError) {
-          console.warn("Failed to parse JSON, attempting fallback:", responseText);
-          return { role: "Unknown", seniority: "Unknown" };
+          console.error("JSON Parse Error. Cleaned text was:", cleanJson);
+          return { role: "Parse Error", seniority: "Parse Error" };
         }
+      } else {
+        console.warn("Gemini returned an empty response text.");
       }
     } catch (err: any) {
-      // If we hit a safety/quota error, wait briefly, but watch the clock
+      const duration = Date.now() - startTime;
+      console.error(`Gemini Attempt ${i + 1} FAILED after ${duration}ms:`, err.message);
+      
+      // Check for common Vercel/API issues
+      if (err.message.includes("403")) console.error("Check if your API Key is valid and has Gemini access.");
+      if (err.message.includes("429")) console.error("Rate limit hit.");
+
       const delay = 1000 * (i + 1); 
-      console.warn(`Attempt ${i + 1} failed: ${err.message}.`);
-      if (i < 1) await new Promise((r) => setTimeout(r, delay));
+      if (i < 1) {
+        console.log(`Waiting ${delay}ms before next retry...`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
   }
 
+  console.error("All Gemini attempts exhausted. Returning Unknown.");
   return { role: "Unknown", seniority: "Unknown" };
 }
 
