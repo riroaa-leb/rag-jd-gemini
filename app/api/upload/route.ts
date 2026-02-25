@@ -33,13 +33,14 @@ ${text.slice(0, 3000)}
       const result = await model.generateContent(prompt);
       const responseText = result.response.text();
       const duration = Date.now() - startTime;
+      let cleanJson = "";
 
       console.log(`Gemini Attempt ${i + 1} received in ${duration}ms`);
       console.log("Raw Response Content:", responseText);
 
       if (responseText) {
         try {
-          const cleanJson = responseText.replace(/```json|```/g, "").trim();
+          cleanJson = responseText.replace(/```json|```/g, "").trim();
           const parsed = JSON.parse(cleanJson);
           console.log("Successfully parsed metadata:", parsed);
           return parsed;
