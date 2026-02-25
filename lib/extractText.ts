@@ -1,21 +1,14 @@
-import * as pdf from "pdf-parse";
+// @/lib/extractText.ts
+import pdf from "pdf-parse-fork";
 import mammoth from "mammoth";
-
-// Fix for Vercel/Node environment missing DOMMatrix
-if (typeof global.DOMMatrix === "undefined") {
-  (global as any).DOMMatrix = class {
-    constructor() {}
-    static fromFloat32Array() { return new this(); }
-    static fromFloat64Array() { return new this(); }
-  };
-}
 
 export async function extractText(file: File) {
   const buffer = Buffer.from(await file.arrayBuffer());
 
   // --- PDF ---
   if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-    const data = await (pdf as any).default(buffer);
+    // pdf-parse-fork is much more Node-friendly
+    const data = await pdf(buffer);
     return data.text;
   }
 
