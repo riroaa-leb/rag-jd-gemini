@@ -1,5 +1,6 @@
-// @/lib/extractText.ts
-import pdf from "pdf-parse-fork";
+export const runtime = "nodejs"; // <-- VERY IMPORTANT
+
+import * as pdf from "pdf-parse";
 import mammoth from "mammoth";
 
 export async function extractText(file: File) {
@@ -7,8 +8,7 @@ export async function extractText(file: File) {
 
   // --- PDF ---
   if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-    // pdf-parse-fork is much more Node-friendly
-    const data = await pdf(buffer);
+    const data = await (pdf as any).default(buffer);
     return data.text;
   }
 
