@@ -2,37 +2,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
 import { supabase } from "@/lib/db";
+import { extractText } from "@/lib/extractText";
 import { chunkText } from "@/lib/chunker";
 import { embed } from "@/lib/embedding";
 import { genAI } from "@/lib/gemini";
-import { createRequire } from "module";
-
-// --- Extract text (PDF + plain text) ---
-async function extractText(file: File) {
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  if (file.type === "application/pdf") {
-    // Use CommonJS require for pdf-parse in ESM
-    const require = createRequire(import.meta.url);
-    const pdfParse = require("pdf-parse");
-    const data = await pdfParse(buffer);
-    return data.text;
-  }
-
-  // fallback for plain text files
-  return new TextDecoder().decode(arrayBuffer);
-}
-
-// --- Clean text for PostgreSQL ---
-function cleanTextForPostgres(text: string) {
-  return text.replace(/[\u0000-\u001F\u007F]/g, "");
-}
 
 // --- Extract role + seniority using Gemini 2.5 Flash ---
 async function getJobMetadata(text: string) {
+  // 1. Correct Model Name
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: "gemini-2.5-flash", 
     generationConfig: { responseMimeType: "application/json" },
   });
 
@@ -44,27 +23,31 @@ Job Description:
 ${text.slice(0, 3000)}
 `;
 
-  for (let i = 0; i < 5; i++) {
+  // On Vercel, reduce retries to 2. If it fails twice, 
+  // you're likely hitting a timeout anyway.
+  for (let i = 0; i < 2; i++) {
     try {
       const result = await model.generateContent(prompt);
-      const responseText = result.response.text();
+      let responseText = result.response.text();
 
       if (responseText) {
         try {
-          return JSON.parse(responseText);
-        } catch {
-          console.warn("Failed to parse JSON:", responseText);
+          // Sanitize: remove markdown backticks if present
+          const cleanJson = responseText.replace(/```json|```/g, "").trim();
+          return JSON.parse(cleanJson);
+        } catch (parseError) {
+          console.warn("Failed to parse JSON, attempting fallback:", responseText);
           return { role: "Unknown", seniority: "Unknown" };
         }
       }
     } catch (err: any) {
-      const delay = Math.pow(2, i) * 1000;
-      console.warn(`Attempt ${i + 1} failed: ${err.message}. Retrying in ${delay / 1000}s...`);
-      await new Promise((r) => setTimeout(r, delay));
+      // If we hit a safety/quota error, wait briefly, but watch the clock
+      const delay = 1000 * (i + 1); 
+      console.warn(`Attempt ${i + 1} failed: ${err.message}.`);
+      if (i < 1) await new Promise((r) => setTimeout(r, delay));
     }
   }
 
-  console.error("Failed to extract metadata after 5 attempts.");
   return { role: "Unknown", seniority: "Unknown" };
 }
 
@@ -78,10 +61,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
     }
 
-    // 1️⃣ Extract and clean text
-    let text = await extractText(file);
-    text = cleanTextForPostgres(text);
-
+    // 1️⃣ Extract text
+    const text = await extractText(file);
     if (!text || text.trim().length === 0) {
       return NextResponse.json({ error: "Failed to extract text from file" }, { status: 400 });
     }
@@ -92,7 +73,7 @@ export async function POST(req: NextRequest) {
     // 2️⃣ Extract metadata
     const metadata = await getJobMetadata(text);
 
-    // 3️⃣ Insert JD into Supabase
+    // 3️⃣ Insert JD into Supabase and capture errors
     const jdId = uuidv4();
     const { error: jdError } = await supabase.from("job_descriptions").insert({
       id: jdId,
@@ -105,16 +86,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: jdError.message }, { status: 500 });
     }
 
-    // 4️⃣ Chunk the cleaned text
+    // 4️⃣ Chunk the text
     const chunks = chunkText(text);
     console.log("Number of chunks:", chunks.length);
 
-    // 5️⃣ Embed and insert each chunk safely
+    // 5️⃣ Embed and insert each chunk
     for (const chunk of chunks) {
-      const safeChunk = cleanTextForPostgres(chunk);
       try {
-        const embedding = await embed(safeChunk);
+        const embedding = await embed(chunk);
 
+        // Validate embedding
         if (!Array.isArray(embedding) || embedding.length !== 3072) {
           console.warn("Invalid embedding, skipping chunk:", embedding?.length);
           continue;
@@ -123,7 +104,7 @@ export async function POST(req: NextRequest) {
         const { error: chunkError } = await supabase.from("document_chunks").insert({
           id: uuidv4(),
           jd_id: jdId,
-          content: safeChunk,
+          content: chunk,
           embedding,
         });
 
