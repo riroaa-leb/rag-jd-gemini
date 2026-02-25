@@ -5,20 +5,28 @@ import { supabase } from "@/lib/db";
 import { chunkText } from "@/lib/chunker";
 import { embed } from "@/lib/embedding";
 import { genAI } from "@/lib/gemini";
-import pdf from "pdf-parse";
+import { createRequire } from "module";
 
-// --- Extract text from PDF or fallback to text file ---
+// --- Extract text (PDF + plain text) ---
 async function extractText(file: File) {
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
   if (file.type === "application/pdf") {
-    const data = await pdf(buffer);
+    // Use CommonJS require for pdf-parse in ESM
+    const require = createRequire(import.meta.url);
+    const pdfParse = require("pdf-parse");
+    const data = await pdfParse(buffer);
     return data.text;
   }
 
-  // For plain text files
+  // fallback for plain text files
   return new TextDecoder().decode(arrayBuffer);
+}
+
+// --- Clean text for PostgreSQL ---
+function cleanTextForPostgres(text: string) {
+  return text.replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
 // --- Extract role + seniority using Gemini 2.5 Flash ---
@@ -70,8 +78,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
     }
 
-    // 1️⃣ Extract text
-    const text = await extractText(file);
+    // 1️⃣ Extract and clean text
+    let text = await extractText(file);
+    text = cleanTextForPostgres(text);
+
     if (!text || text.trim().length === 0) {
       return NextResponse.json({ error: "Failed to extract text from file" }, { status: 400 });
     }
@@ -95,14 +105,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: jdError.message }, { status: 500 });
     }
 
-    // 4️⃣ Chunk the text
+    // 4️⃣ Chunk the cleaned text
     const chunks = chunkText(text);
     console.log("Number of chunks:", chunks.length);
 
-    // 5️⃣ Embed and insert each chunk
+    // 5️⃣ Embed and insert each chunk safely
     for (const chunk of chunks) {
+      const safeChunk = cleanTextForPostgres(chunk);
       try {
-        const embedding = await embed(chunk);
+        const embedding = await embed(safeChunk);
 
         if (!Array.isArray(embedding) || embedding.length !== 3072) {
           console.warn("Invalid embedding, skipping chunk:", embedding?.length);
@@ -112,7 +123,7 @@ export async function POST(req: NextRequest) {
         const { error: chunkError } = await supabase.from("document_chunks").insert({
           id: uuidv4(),
           jd_id: jdId,
-          content: chunk,
+          content: safeChunk,
           embedding,
         });
 
